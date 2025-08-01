@@ -96,8 +96,13 @@ func (tr *traceroute) Stop() {
 	if tr.packet != nil {
 		tr.packet.stop()
 	}
-	close(tr.wc)
-	close(tr.rc)
+	go func() {
+		// FIXME
+		time.AfterFunc(time.Second, func() {
+			close(tr.wc)
+			close(tr.rc)
+		})
+	}()
 }
 
 func (tr *traceroute) startRead() {
