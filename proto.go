@@ -34,6 +34,8 @@ func pong(ttl, id, seq int, addr net.Addr, rtt time.Duration) *Proto {
 	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr, Rtt: rtt}
 }
 
+var timeout = ping
+
 func (p *Proto) String() string {
 	return fmt.Sprintf("TTL: %d, ID: %d, Seq: %d, Addr: %v, Rtt: %v", p.TTL, p.ID, p.Seq, p.Addr, p.Rtt)
 }

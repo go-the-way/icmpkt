@@ -32,6 +32,7 @@ type (
 		wc                    chan *Proto
 		rc                    chan *Proto
 		id, seq               []int
+		send, recv            []int
 		run, exit             bool
 		pongHandler           func(pong *Proto)
 
@@ -53,6 +54,8 @@ func Traceroute(address string, maxTTL, count int, writeDur time.Duration) *trac
 		rc:       make(chan *Proto, 1),
 		id:       make([]int, maxTTL+1),
 		seq:      make([]int, maxTTL+1),
+		send:     make([]int, maxTTL+1),
+		recv:     make([]int, maxTTL+1),
 	}
 	return tr
 }
@@ -105,15 +108,20 @@ func (tr *traceroute) startRead() {
 			}
 			pto, ok := <-tr.rc
 			if ok {
-				if pto.Addr.String() == tr.addr.String() && tr.maxHop > pto.TTL {
-					tr.maxHop = pto.TTL
-				}
-				if tr.pongHandler != nil {
-					tr.pongHandler(pto)
-				}
+				tr.read(pto)
 			}
 		}
 	}()
+}
+
+func (tr *traceroute) read(pto *Proto) {
+	if pto.Addr.String() == tr.addr.String() && tr.maxHop > pto.TTL {
+		tr.maxHop = pto.TTL
+	}
+	if tr.pongHandler != nil {
+		tr.pongHandler(pto)
+	}
+	tr.recv[pto.TTL]++
 }
 
 func (tr *traceroute) startCtx() {
@@ -145,14 +153,19 @@ func (tr *traceroute) startWrite() {
 			if ttl > tr.maxHop {
 				continue
 			}
-			tr.write(tr.ping(ttl))
+			tr.seq[ttl]++
+			proto := tr.ping(ttl)
+			tr.write(proto)
+			if tr.send[ttl] > tr.recv[ttl] {
+				tr.read(timeout(ttl, proto.ID, proto.Seq-1, tr.addr))
+			}
+			tr.send[ttl]++
 			time.Sleep(tr.writeDur)
 		}
 	}
 }
 
 func (tr *traceroute) ping(ttl int) *Proto {
-	tr.seq[ttl]++
 	return ping(ttl, tr.id[ttl], tr.seq[ttl], addr0(tr.address))
 }
 
