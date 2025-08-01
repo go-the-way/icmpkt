@@ -63,6 +63,8 @@ func (tr *traceroute) init() {
 	}
 }
 
+func (tr *traceroute) Addr() string { return tr.addr.String() }
+
 func (tr *traceroute) Context(ctx context.Context) {
 	tr.ctx = ctx
 	tr.ctxDone = make(chan struct{}, 1)
