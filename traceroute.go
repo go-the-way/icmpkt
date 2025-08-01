@@ -98,10 +98,7 @@ func (tr *traceroute) Stop() {
 	}
 	go func() {
 		// FIXME
-		time.AfterFunc(time.Second, func() {
-			close(tr.wc)
-			close(tr.rc)
-		})
+		time.AfterFunc(time.Millisecond*100, func() { close(tr.wc); close(tr.rc) })
 	}()
 }
 
