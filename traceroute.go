@@ -15,6 +15,7 @@ import (
 	"context"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -23,56 +24,47 @@ var icmpId = uint32(os.Getpid() & 0xffff)
 
 func nextIcmpId() uint32 { return atomic.AddUint32(&icmpId, 1) }
 
-type (
-	traceroute struct {
-		address               string
-		addr                  net.Addr
-		maxTTL, maxHop, count int
-		writeDur              time.Duration
-		wc                    chan *Proto
-		rc                    chan *Proto
-		id, seq               []int
-		send, recv            []int
-		run, exit             bool
-		pongHandler           func(pong *Proto)
+type traceroute struct {
+	address                 string
+	addr                    net.Addr
+	maxTTL, maxHop, count   int
+	ttlDur, hopDur, readDur time.Duration
+	wc, rc                  chan *Proto
+	id                      []int
+	ic                      []chan *Proto
+	run, exit               bool
+	pongHandler             func(pong *Proto)
+	ctx                     context.Context
+	ctxDone                 chan struct{}
+	packet                  *packet
+	troute                  bool
+}
 
-		ctx     context.Context
-		ctxDone chan struct{}
-		packet  *packet
-	}
-)
+func Traceroute(address string, maxTTL, count int) *traceroute {
+	return TracerouteDuration(address, maxTTL, count, time.Millisecond*100, time.Millisecond*500, time.Millisecond*500)
+}
 
-func Traceroute(address string, maxTTL, count int, writeDur time.Duration) *traceroute {
+func TracerouteDuration(address string, maxTTL, count int, hopDur, ttlDur, readDur time.Duration) *traceroute {
 	tr := &traceroute{
-		address:  address,
-		addr:     addr0(address),
-		maxTTL:   maxTTL,
-		maxHop:   maxTTL,
-		count:    count,
-		writeDur: writeDur,
-		wc:       make(chan *Proto, 1),
-		rc:       make(chan *Proto, 1),
-		id:       make([]int, maxTTL+1),
-		seq:      make([]int, maxTTL+1),
-		send:     make([]int, maxTTL+1),
-		recv:     make([]int, maxTTL+1),
+		address: address,
+		addr:    ip4(address),
+		maxTTL:  maxTTL,
+		maxHop:  maxTTL,
+		count:   count,
+		hopDur:  hopDur,
+		ttlDur:  ttlDur,
+		readDur: readDur,
+		wc:      make(chan *Proto, 1),
+		rc:      make(chan *Proto, 1),
+		id:      make([]int, maxTTL),
+		ic:      make([]chan *Proto, maxTTL),
+		troute:  true,
 	}
 	return tr
 }
 
-func (tr *traceroute) init() {
-	for ttl := 1; ttl <= tr.maxTTL; ttl++ {
-		tr.id[ttl] = int(nextIcmpId())
-	}
-}
-
-func (tr *traceroute) Addr() string { return tr.addr.String() }
-
-func (tr *traceroute) Context(ctx context.Context) {
-	tr.ctx = ctx
-	tr.ctxDone = make(chan struct{}, 1)
-}
-
+func (tr *traceroute) Addr() string                          { return tr.addr.String() }
+func (tr *traceroute) Context(ctx context.Context)           { tr.ctx = ctx; tr.ctxDone = make(chan struct{}, 1) }
 func (tr *traceroute) PongHandler(handler func(pong *Proto)) { tr.pongHandler = handler }
 
 func (tr *traceroute) Run() {
@@ -81,10 +73,9 @@ func (tr *traceroute) Run() {
 	}
 	tr.run = true
 	tr.packet = newPacket(tr.rc, tr.wc)
-	tr.init()
-	tr.startRead()
+	tr.startPong()
+	tr.startPing()
 	tr.startCtx()
-	tr.startWrite()
 	tr.Stop()
 }
 
@@ -96,34 +87,85 @@ func (tr *traceroute) Stop() {
 	if tr.packet != nil {
 		tr.packet.stop()
 	}
-	go func() {
-		// FIXME
-		time.AfterFunc(time.Millisecond*100, func() { close(tr.wc); close(tr.rc) })
-	}()
+	close(tr.wc)
+	close(tr.rc)
 }
 
-func (tr *traceroute) startRead() {
+// traceroute <- packet
+func (tr *traceroute) pong(pto *Proto) {
+	if tr.troute {
+		tr.ic[pto.TTL-1] <- pto
+	} else {
+		tr.ic[0] <- pto
+	}
+}
+
+func (tr *traceroute) startPong() {
 	go func() {
 		for {
-			if tr.exit {
-				return
-			}
-			pto, ok := <-tr.rc
-			if ok {
-				tr.read(pto)
+			if pong, ok := <-tr.rc; ok {
+				if tr.troute {
+					if pong.Addr.String() == tr.addr.String() && tr.maxHop > pong.TTL {
+						tr.maxHop = pong.TTL
+					}
+				}
+				tr.pong(pong)
 			}
 		}
 	}()
 }
 
-func (tr *traceroute) read(pto *Proto) {
-	if pto.Addr.String() == tr.addr.String() && tr.maxHop > pto.TTL {
-		tr.maxHop = pto.TTL
+// traceroute -> packet
+func (tr *traceroute) ping(pto *Proto) { tr.wc <- pto }
+func (tr *traceroute) startPing() {
+	for seq := 1; seq <= tr.count; seq++ {
+		wg := &sync.WaitGroup{}
+		for ttl := 0; ttl < tr.maxHop; ttl++ {
+			tr.ic[ttl] = make(chan *Proto, 1)
+			if tr.exit {
+				return
+			}
+			if tr.id[ttl] == 0 {
+				tr.id[ttl] = int(nextIcmpId())
+			}
+			id := tr.id[ttl]
+			ttl0 := ttl
+			if tr.troute {
+				ttl0++
+			}
+			tr.ping(pingProto(ttl0, id, seq, tr.addr))
+			wg.Add(1)
+			go tr.readTTL(wg, ttl, id, seq)
+			if tr.troute {
+				time.Sleep(tr.ttlDur)
+			}
+		}
+		wg.Wait()
+		time.Sleep(tr.hopDur)
 	}
-	if tr.pongHandler != nil {
-		tr.pongHandler(pto)
+}
+
+func (tr *traceroute) readTTL(wg *sync.WaitGroup, ttl, id, seq int) {
+	defer wg.Done()
+	var pong *Proto
+loop:
+	for {
+		select {
+		case pong = <-tr.ic[ttl]:
+			close(tr.ic[ttl])
+			break loop
+		case <-time.After(tr.readDur):
+			ttl0 := ttl
+			if tr.troute {
+				ttl0++
+			}
+			pong = timeoutProto(ttl0, id, seq)
+			break loop
+		}
 	}
-	tr.recv[pto.TTL]++
+	if pong != nil && tr.pongHandler != nil {
+		tr.pongHandler(pong)
+	}
 }
 
 func (tr *traceroute) startCtx() {
@@ -144,34 +186,4 @@ func (tr *traceroute) startCtx() {
 	}()
 }
 
-func (tr *traceroute) write(ping *Proto) { tr.wc <- ping }
-
-func (tr *traceroute) startWrite() {
-	for hop := 1; hop <= tr.count; hop++ {
-		for ttl := 1; ttl <= tr.maxTTL; ttl++ {
-			if tr.exit {
-				return
-			}
-			if ttl > tr.maxHop {
-				continue
-			}
-			tr.seq[ttl]++
-			proto := tr.ping(ttl)
-			tr.write(proto)
-			if tr.send[ttl] > tr.recv[ttl] {
-				tr.read(timeout(ttl, proto.ID, proto.Seq-1, tr.addr))
-			}
-			tr.send[ttl]++
-			time.Sleep(tr.writeDur)
-		}
-	}
-}
-
-func (tr *traceroute) ping(ttl int) *Proto {
-	return ping(ttl, tr.id[ttl], tr.seq[ttl], addr0(tr.address))
-}
-
-func addr0(s string) (addr net.Addr) {
-	addr, _ = net.ResolveIPAddr("ip4", s)
-	return
-}
+func ip4(s string) (addr net.Addr) { addr, _ = net.ResolveIPAddr("ip4", s); return }

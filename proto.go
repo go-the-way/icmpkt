@@ -26,15 +26,15 @@ type Proto struct {
 	Rtt          time.Duration
 }
 
-func ping(ttl, id, seq int, addr net.Addr) *Proto {
+func pingProto(ttl, id, seq int, addr net.Addr) *Proto {
 	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr}
 }
 
-func pong(ttl, id, seq int, addr net.Addr, rtt time.Duration) *Proto {
+func pongProto(ttl, id, seq int, addr net.Addr, rtt time.Duration) *Proto {
 	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr, Rtt: rtt}
 }
 
-var timeout = ping
+func timeoutProto(ttl, id, seq int) *Proto { return &Proto{TTL: ttl, ID: id, Seq: seq} }
 
 func (p *Proto) String() string {
 	return fmt.Sprintf("TTL: %d, ID: %d, Seq: %d, Addr: %v, Rtt: %v", p.TTL, p.ID, p.Seq, p.Addr, p.Rtt)

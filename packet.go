@@ -85,11 +85,11 @@ func (p *packet) start() {
 }
 
 func (p *packet) stop() {
-	p.log("stop...")
 	p.exit = true
 	if p.packetConn != nil {
 		_ = p.packetConn.Close()
 	}
+	p.log("stop packet")
 }
 
 func (p *packet) startWrite() {
@@ -124,18 +124,25 @@ func (p *packet) startWrite() {
 func (p *packet) startRead() {
 	p.log("start read")
 	defer p.log("stop read")
-	buf := make([]byte, 64)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	buf := make([]byte, 128)
 	for {
-		n, srcAddr, _ := p.packetConn.ReadFrom(buf)
-		if n > 0 && srcAddr != nil {
-			buf2 := buf[:n]
-			if msg, _ := icmp.ParseMessage(1, buf2); msg != nil {
-				if pto := p.messageRead(msg, srcAddr); pto != nil {
-					p.debug("read from srcAddr[%s] id[%d] seq[%d] rtt[%v] ok len: %d\n", srcAddr.String(), pto.ID, pto.Seq, pto.Rtt, n)
-					if p.exit {
-						return
+		select {
+		case <-ticker.C:
+			if p.exit {
+				return
+			}
+		default:
+			_ = p.packetConn.SetReadDeadline(time.Now().Add(time.Millisecond * 10))
+			n, srcAddr, _ := p.packetConn.ReadFrom(buf)
+			if n > 0 && srcAddr != nil {
+				buf2 := buf[:n]
+				if msg, _ := icmp.ParseMessage(1, buf2); msg != nil {
+					if pto := p.messageRead(msg, srcAddr); pto != nil {
+						p.debug("read from srcAddr[%s] id[%d] seq[%d] rtt[%v] ok len: %d\n", srcAddr.String(), pto.ID, pto.Seq, pto.Rtt, n)
+						p.wc <- pto
 					}
-					p.wc <- pto
 				}
 			}
 		}
@@ -146,7 +153,7 @@ func (p *packet) messageRead(msg *icmp.Message, srcAddr net.Addr) (pto *Proto) {
 	parseEcho := func(ec *icmp.Echo) (pto *Proto) {
 		if ec != nil && ec.ID > 0 && ec.Seq > 0 {
 			if ttl, rtt := p.getTTL(ec); rtt > 0 {
-				pto = pong(ttl, ec.ID, ec.Seq, srcAddr, rtt)
+				pto = pongProto(ttl, ec.ID, ec.Seq, srcAddr, rtt)
 			}
 		}
 		return
