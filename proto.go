@@ -23,21 +23,22 @@ import (
 type Proto struct {
 	TTL, ID, Seq int
 	Addr         net.Addr
+	Ip4          string
 	Rtt          time.Duration
 }
 
-func pingProto(ttl, id, seq int, addr net.Addr) *Proto {
-	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr}
+func pingProto(ttl, id, seq int, addr net.Addr, ip4 string) *Proto {
+	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr, Ip4: ip4}
 }
 
-func pongProto(ttl, id, seq int, addr net.Addr, rtt time.Duration) *Proto {
-	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr, Rtt: rtt}
+func pongProto(ttl, id, seq int, addr net.Addr, ip4 string, rtt time.Duration) *Proto {
+	return &Proto{TTL: ttl, ID: id, Seq: seq, Addr: addr, Ip4: ip4, Rtt: rtt}
 }
 
 func timeoutProto(ttl, id, seq int) *Proto { return &Proto{TTL: ttl, ID: id, Seq: seq} }
 
 func (p *Proto) String() string {
-	return fmt.Sprintf("TTL: %d, ID: %d, Seq: %d, Addr: %v, Rtt: %v", p.TTL, p.ID, p.Seq, p.Addr, p.Rtt)
+	return fmt.Sprintf("{TTL: %d, ID: %d, Seq: %d, Addr: %v, Ip4: %v, Rtt: %v}", p.TTL, p.ID, p.Seq, p.Addr, p.Ip4, p.Rtt)
 }
 
 func (p *Proto) buf() []byte {

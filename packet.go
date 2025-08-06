@@ -28,6 +28,11 @@ const (
 	listenAddress = "0.0.0.0"
 )
 
+var (
+	icmpktDebug = os.Getenv("ICMPKT_DEBUG") == "T"
+	icmpktTrace = os.Getenv("ICMPKT_TRACE") == "T"
+)
+
 type (
 	ttlOpt struct {
 		ttl  int
@@ -36,65 +41,78 @@ type (
 	packet struct {
 		lo         *logpkg.Logger
 		packetConn *icmp.PacketConn
-
-		wc chan<- *Proto
-		rc <-chan *Proto
-
-		mu *sync.Mutex
-		m  map[int]ttlOpt
-
-		exit bool
+		wc         chan<- *Proto
+		rc         <-chan *Proto
+		mu         *sync.Mutex
+		m          map[int]ttlOpt
+		exit       bool
 	}
 )
 
 func newPacket(wc chan<- *Proto, rc <-chan *Proto) *packet {
-	return (&packet{
-		lo: logpkg.New(os.Stdout, "[icmp-packet] ", logpkg.LstdFlags|logpkg.Lshortfile),
+	pkt := &packet{
 		wc: wc,
 		rc: rc,
 		mu: &sync.Mutex{},
 		m:  make(map[int]ttlOpt),
-	}).run()
+	}
+	if icmpktDebug || icmpktTrace {
+		pkt.lo = logpkg.New(os.Stdout, fmt.Sprintf("[icmp-packet%0-18s] ", ""), logpkg.LstdFlags)
+	}
+	pkt.run()
+	return pkt
 }
 
 func (p *packet) debug(format string, arg ...any) {
-	if debug {
-		p.lo.Printf(format, arg...)
+	if icmpktDebug {
+		p.lo.Println(fmt.Sprintf(format, arg...))
 	}
 }
 
-func (p *packet) log(format string, arg ...any) { p.debug(format, arg...) }
-
-func (p *packet) panic(format string, arg ...any) { p.lo.Panicf(format, arg...) }
+func (p *packet) trace(format string, arg ...any) {
+	if icmpktTrace {
+		p.lo.Println(fmt.Sprintf(format, arg...))
+	}
+}
 
 func (p *packet) listen() {
+	p.trace("listen() start")
+	defer p.trace("listen() end")
 	var err error
 	p.packetConn, err = icmp.ListenPacket(listenNetwork, listenAddress)
 	if err != nil {
-		panic(fmt.Sprintf("listen on[%s:%s] error: %v\n", listenNetwork, listenAddress, err))
+		panic(fmt.Sprintf("listen() listen on[%s:%s] error:%v", listenNetwork, listenAddress, err))
 		return
 	}
-	p.log("listen on[%s:%s] ok\n", listenNetwork, listenAddress)
+	p.trace("listen() listen on %s:%s", listenNetwork, listenAddress)
 }
 
-func (p *packet) run() *packet { p.listen(); p.start(); return p }
+func (p *packet) run() {
+	p.trace("run() start")
+	defer p.trace("run() end")
+	p.listen()
+	p.start()
+}
 
 func (p *packet) start() {
+	p.trace("start() start")
+	defer p.trace("start() end")
 	go p.startWrite()
 	go p.startRead()
 }
 
 func (p *packet) stop() {
+	p.trace("stop() start")
+	defer p.trace("stop() end")
 	p.exit = true
 	if p.packetConn != nil {
 		_ = p.packetConn.Close()
 	}
-	p.log("stop packet")
 }
 
 func (p *packet) startWrite() {
-	p.log("start write")
-	defer p.log("stop write")
+	p.trace("startWrite() start")
+	defer p.trace("startWrite() end")
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -104,26 +122,27 @@ func (p *packet) startWrite() {
 				return
 			}
 		case pto, ok := <-p.rc:
-			if ok {
-				isTtl := pto.TTL > 0
-				if isTtl {
-					_ = p.packetConn.IPv4PacketConn().SetTTL(pto.TTL)
-				}
-				n, err := p.packetConn.WriteTo(pto.buf(), pto.Addr)
-				if err != nil {
-					p.debug("write to dstAddr[%s] ttl[%d] id[%d] seq[%d] error: %v\n", pto.Addr.String(), pto.TTL, pto.ID, pto.Seq, err)
-				} else {
-					p.debug("write to dstAddr[%s] ttl[%d] id[%d] seq[%d] ok len: %d\n", pto.Addr.String(), pto.TTL, pto.ID, pto.Seq, n)
-					p.setTTL(pto.TTL, pto.ID, pto.Seq)
-				}
+			if !ok {
+				return
+			}
+			isTtl := pto.TTL > 0
+			if isTtl {
+				_ = p.packetConn.IPv4PacketConn().SetTTL(pto.TTL)
+			}
+			_, err := p.packetConn.WriteTo(pto.buf(), pto.Addr)
+			if err != nil {
+				p.debug("conn<<<<<<-err: %s, %v", pto, err)
+			} else {
+				p.debug("conn<<<<<<-ok: %s", pto)
+				p.setTTL(pto.TTL, pto.ID, pto.Seq)
 			}
 		}
 	}
 }
 
 func (p *packet) startRead() {
-	p.log("start read")
-	defer p.log("stop read")
+	p.trace("startRead() start")
+	defer p.trace("startRead() end")
 	ticker := time.NewTicker(time.Millisecond)
 	defer ticker.Stop()
 	buf := make([]byte, 128)
@@ -131,6 +150,8 @@ func (p *packet) startRead() {
 		select {
 		case <-ticker.C:
 			if p.exit {
+				close(p.wc)
+				p.trace("startRead() closed wc")
 				return
 			}
 		default:
@@ -140,7 +161,7 @@ func (p *packet) startRead() {
 				buf2 := buf[:n]
 				if msg, _ := icmp.ParseMessage(1, buf2); msg != nil {
 					if pto := p.messageRead(msg, srcAddr); pto != nil {
-						p.debug("read from srcAddr[%s] id[%d] seq[%d] rtt[%v] ok len: %d\n", srcAddr.String(), pto.ID, pto.Seq, pto.Rtt, n)
+						p.debug("conn->>>>>>ok: %s", pto.String())
 						p.wc <- pto
 					}
 				}
@@ -153,7 +174,7 @@ func (p *packet) messageRead(msg *icmp.Message, srcAddr net.Addr) (pto *Proto) {
 	parseEcho := func(ec *icmp.Echo) (pto *Proto) {
 		if ec != nil && ec.ID > 0 && ec.Seq > 0 {
 			if ttl, rtt := p.getTTL(ec); rtt > 0 {
-				pto = pongProto(ttl, ec.ID, ec.Seq, srcAddr, rtt)
+				pto = pongProto(ttl, ec.ID, ec.Seq, srcAddr, aip4(srcAddr), rtt)
 			}
 		}
 		return
