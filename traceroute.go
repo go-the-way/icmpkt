@@ -203,11 +203,6 @@ func (tr *traceroute) startHandler() {
 	}
 }
 
-func (tr *traceroute) ping(pto *Proto) {
-	tr.wc <- pto
-	tr.debug("packet<<<<<<-: %s", pto)
-}
-
 func (tr *traceroute) closes() {
 	for ttl, ic := range tr.ic {
 		if ic != nil {
@@ -219,6 +214,11 @@ func (tr *traceroute) closes() {
 			}
 		}
 	}
+}
+
+func (tr *traceroute) ping(pto *Proto) {
+	tr.wc <- pto
+	tr.debug("packet<<<<<<-: %s", pto)
 }
 
 func (tr *traceroute) runPing() {
