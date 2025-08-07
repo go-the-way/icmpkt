@@ -12,10 +12,7 @@
 package icmpkt
 
 import (
-	"fmt"
-	logpkg "log"
 	"os"
-	"sync"
 	"time"
 )
 
@@ -27,29 +24,9 @@ var (
 type ping = traceroute
 
 func Ping(address string, count int) *ping {
-	return PingDuration(address, count, time.Millisecond*500, time.Millisecond*500, time.Millisecond*500)
+	return PingDuration(address, count, time.Millisecond*500, time.Millisecond*500)
 }
 
-func PingDuration(address string, count int, ttl0Dur, ttl1Dur, readDur time.Duration) *ping {
-	p := &ping{
-		address: address,
-		maxTTL:  1,
-		maxHop:  1,
-		count:   count,
-		ttl0Dur: ttl0Dur,
-		ttl1Dur: ttl1Dur,
-		readDur: readDur,
-		wc:      make(chan *Proto, 1),
-		rc:      make(chan *Proto, 1),
-		hc:      make(chan *Proto, 1),
-		id:      make([]int, 1),
-		recv:    make([]int, 1),
-		ic:      make([]chan *Proto, 1),
-		wg:      &sync.WaitGroup{},
-	}
-	p.addr, p.ip4 = ip4(address)
-	if pingDebug || pingTrace {
-		p.lo = logpkg.New(os.Stdout, fmt.Sprintf("[ping:%-24s] ", p.address), logpkg.LstdFlags)
-	}
-	return p
+func PingDuration(address string, count int, writeDur, readDur time.Duration) *ping {
+	return newTraceroute(address, 1, count, writeDur, readDur, false)
 }

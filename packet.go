@@ -16,6 +16,7 @@ import (
 	logpkg "log"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,7 +37,7 @@ var (
 type (
 	ttlOpt struct {
 		ttl  int
-		time time.Time
+		unix int64
 	}
 	packet struct {
 		lo         *logpkg.Logger
@@ -44,17 +45,19 @@ type (
 		wc         chan<- *Proto
 		rc         <-chan *Proto
 		mu         *sync.Mutex
-		m          map[int]ttlOpt
-		exit       bool
+		m          map[string]ttlOpt
+		wec, rec   chan struct{}
 	}
 )
 
 func newPacket(wc chan<- *Proto, rc <-chan *Proto) *packet {
 	pkt := &packet{
-		wc: wc,
-		rc: rc,
-		mu: &sync.Mutex{},
-		m:  make(map[int]ttlOpt),
+		wc:  wc,
+		rc:  rc,
+		mu:  &sync.Mutex{},
+		m:   make(map[string]ttlOpt),
+		wec: make(chan struct{}, 1),
+		rec: make(chan struct{}, 1),
 	}
 	if icmpktDebug || icmpktTrace {
 		pkt.lo = logpkg.New(os.Stdout, fmt.Sprintf("[icmp-packet%0-18s] ", ""), logpkg.LstdFlags)
@@ -104,7 +107,10 @@ func (p *packet) start() {
 func (p *packet) stop() {
 	p.trace("stop() start")
 	defer p.trace("stop() end")
-	p.exit = true
+	p.wec <- struct{}{}
+	close(p.wec)
+	p.rec <- struct{}{}
+	close(p.rec)
 	if p.packetConn != nil {
 		_ = p.packetConn.Close()
 	}
@@ -113,25 +119,26 @@ func (p *packet) stop() {
 func (p *packet) startWrite() {
 	p.trace("startWrite() start")
 	defer p.trace("startWrite() end")
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
 	for {
 		select {
-		case <-ticker.C:
-			if p.exit {
-				return
-			}
+		case <-p.wec:
+			return
 		case pto, ok := <-p.rc:
 			if !ok {
 				return
 			}
-			isTtl := pto.TTL > 0
-			if isTtl {
-				_ = p.packetConn.IPv4PacketConn().SetTTL(pto.TTL)
+			setTtl := pto.TTL > 0
+			if setTtl {
+				if err := p.packetConn.IPv4PacketConn().SetTTL(pto.TTL); p.closed(err) {
+					return
+				}
 			}
 			_, err := p.packetConn.WriteTo(pto.buf(), pto.Addr)
 			if err != nil {
 				p.debug("conn<<<<<<-err: %s, %v", pto, err)
+				if p.closed(err) {
+					return
+				}
 			} else {
 				p.debug("conn<<<<<<-ok: %s", pto)
 				p.setTTL(pto.TTL, pto.ID, pto.Seq)
@@ -143,20 +150,25 @@ func (p *packet) startWrite() {
 func (p *packet) startRead() {
 	p.trace("startRead() start")
 	defer p.trace("startRead() end")
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
-	buf := make([]byte, 128)
+	buf := make([]byte, 64)
 	for {
 		select {
-		case <-ticker.C:
-			if p.exit {
+		case <-p.rec:
+			close(p.wc)
+			p.trace("startRead() closed wc")
+			return
+		default:
+			if err := p.packetConn.SetReadDeadline(time.Now().Add(time.Millisecond * 10)); p.closed(err) {
 				close(p.wc)
 				p.trace("startRead() closed wc")
 				return
 			}
-		default:
-			_ = p.packetConn.SetReadDeadline(time.Now().Add(time.Millisecond * 10))
-			n, srcAddr, _ := p.packetConn.ReadFrom(buf)
+			n, srcAddr, err := p.packetConn.ReadFrom(buf)
+			if p.closed(err) {
+				close(p.wc)
+				p.trace("startRead() closed wc")
+				return
+			}
 			if n > 0 && srcAddr != nil {
 				buf2 := buf[:n]
 				if msg, _ := icmp.ParseMessage(1, buf2); msg != nil {
@@ -172,7 +184,7 @@ func (p *packet) startRead() {
 
 func (p *packet) messageRead(msg *icmp.Message, srcAddr net.Addr) (pto *Proto) {
 	parseEcho := func(ec *icmp.Echo) (pto *Proto) {
-		if ec != nil && ec.ID > 0 && ec.Seq > 0 {
+		if ec != nil && ec.ID > 0 {
 			if ttl, rtt := p.getTTL(ec); rtt > 0 {
 				pto = pongProto(ttl, ec.ID, ec.Seq, srcAddr, aip4(srcAddr), rtt)
 			}
@@ -206,18 +218,29 @@ func (p *packet) messageRead(msg *icmp.Message, srcAddr net.Addr) (pto *Proto) {
 
 func (p *packet) setTTL(ttl, id, seq int) {
 	p.mu.Lock()
-	p.m[id<<16|seq] = ttlOpt{ttl, time.Now()}
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	k := fmt.Sprintf("%d-%d", id, seq)
+	now := time.Now().UnixMilli()
+	p.m[k] = ttlOpt{ttl, now}
 }
 
 func (p *packet) getTTL(ec *icmp.Echo) (ttl int, rtt time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	k := ec.ID<<16 | ec.Seq
-	t, ok := p.m[k]
+	k := fmt.Sprintf("%d-%d", ec.ID, ec.Seq)
+	opt, ok := p.m[k]
 	if !ok {
 		return
 	}
 	delete(p.m, k)
-	return t.ttl, time.Since(t.time)
+	now := time.Now().UnixMilli()
+	ms := now - opt.unix
+	if ms == 0 {
+		ms = 1
+	}
+	return opt.ttl, time.Duration(ms) * time.Millisecond
+}
+
+func (p *packet) closed(err error) (closed bool) {
+	return err != nil && strings.HasSuffix(err.Error(), "use of closed network connection")
 }
