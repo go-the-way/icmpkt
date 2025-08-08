@@ -181,6 +181,9 @@ func (tr *traceroute) startPong() {
 }
 
 func (tr *traceroute) handler(pto *Proto) {
+	if tr.exit {
+		return
+	}
 	tr.hc <- pto
 	tr.debug("handler<<<<<-: %s", pto)
 }
@@ -217,6 +220,9 @@ func (tr *traceroute) closes() {
 }
 
 func (tr *traceroute) ping(pto *Proto) {
+	if tr.exit {
+		return
+	}
 	tr.wc <- pto
 	tr.debug("packet<<<<<<-: %s", pto)
 }
